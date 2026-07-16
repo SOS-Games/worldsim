@@ -6,3 +6,8 @@ services:
     environment:
       POSTGRES_PASSWORD: pass
       POSTGRES_DB: simulation_db
+    volumes:
+      - pgdata:/var/lib/postgresql
+
+volumes:
+  pgdata:

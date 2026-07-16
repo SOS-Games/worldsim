@@ -15,17 +15,85 @@ public class SimulationEngine {
     @Inject
     PathfindingService pathfindingService;
 
+    @Inject
+    BehaviorService behaviorService;
+
     @Scheduled(every = "1s")
     @RunOnVirtualThread
     @Transactional
     public void tick() {
         for (Agent agent : Agent.all()) {
-            moveAgent(agent);
+            updateAgent(agent);
             agent.persist();
         }
     }
 
-    private void moveAgent(Agent agent) {
+    private void updateAgent(Agent agent) {
+        if (agent.job == null) {
+            return;
+        }
+
+        Tile current = Tile.findNearest(agent.location);
+        if (current == null) {
+            return;
+        }
+
+        // Deliver cargo in the city.
+        if (current.isCity() && agent.inventoryCount() > 0) {
+            agent.clearInventory();
+            behaviorService.assignGoal(agent);
+            replanPath(agent);
+            return;
+        }
+
+        // Harvest while standing on a matching resource (stay until full or depleted).
+        if (canHarvest(agent, current)) {
+            extractResources(agent, current);
+            if (agent.isInventoryFull()) {
+                behaviorService.assignGoal(agent);
+                replanPath(agent);
+            }
+            return;
+        }
+
+        // Ensure we have a sensible goal for the current inventory state.
+        ensureGoal(agent);
+        moveAlongPath(agent);
+
+        Tile afterMove = Tile.findNearest(agent.location);
+        if (afterMove != null && canHarvest(agent, afterMove)) {
+            extractResources(agent, afterMove);
+            if (agent.isInventoryFull()) {
+                behaviorService.assignGoal(agent);
+                replanPath(agent);
+            }
+        } else if (afterMove != null && afterMove.isCity() && agent.inventoryCount() > 0) {
+            agent.clearInventory();
+            behaviorService.assignGoal(agent);
+            replanPath(agent);
+        }
+    }
+
+    private void ensureGoal(Agent agent) {
+        boolean shouldDeliver = agent.inventoryCount() >= BehaviorService.INVENTORY_CAPACITY;
+        Tile target = agent.targetLocation != null ? Tile.findNearest(agent.targetLocation) : null;
+
+        if (agent.targetLocation == null || agent.currentPath.isEmpty()) {
+            behaviorService.assignGoal(agent);
+            replanPath(agent);
+            return;
+        }
+
+        if (shouldDeliver && (target == null || !target.isCity())) {
+            behaviorService.assignGoal(agent);
+            replanPath(agent);
+        } else if (!shouldDeliver && (target == null || target.isCity())) {
+            behaviorService.assignGoal(agent);
+            replanPath(agent);
+        }
+    }
+
+    private void moveAlongPath(Agent agent) {
         if (agent.targetLocation == null) {
             return;
         }
@@ -42,14 +110,31 @@ public class SimulationEngine {
         agent.location = GeometryFactoryHolder.createPoint(
                 nextTile.location.getX(),
                 nextTile.location.getY());
+    }
 
-        if (agent.currentPath.isEmpty() && hasReachedTarget(agent)) {
-            flipTarget(agent);
-            replanPath(agent);
+    private static boolean canHarvest(Agent agent, Tile tile) {
+        return agent.job != null
+                && !agent.isInventoryFull()
+                && tile.hasResource()
+                && tile.resourceType == agent.job.harvests();
+    }
+
+    private static void extractResources(Agent agent, Tile tile) {
+        tile.quantity -= 1;
+        agent.addToInventory(tile.resourceType, 1);
+
+        if (tile.quantity <= 0) {
+            tile.quantity = 0;
+            tile.resourceType = null;
         }
+        tile.persist();
     }
 
     private void replanPath(Agent agent) {
+        if (agent.targetLocation == null) {
+            return;
+        }
+
         Tile start = Tile.findNearest(agent.location);
         Tile goal = Tile.findNearest(agent.targetLocation);
         if (start == null || goal == null) {
@@ -63,62 +148,5 @@ public class SimulationEngine {
 
         agent.currentPath.clear();
         agent.currentPath.addAll(path);
-    }
-
-    private static boolean hasReachedTarget(Agent agent) {
-        Tile currentTile = Tile.findNearest(agent.location);
-        Tile targetTile = Tile.findNearest(agent.targetLocation);
-        return currentTile != null && targetTile != null && currentTile.id.equals(targetTile.id);
-    }
-
-    private static void flipTarget(Agent agent) {
-        Tile[][] grid = gridBounds();
-        if (grid == null) {
-            return;
-        }
-
-        int maxX = grid.length - 1;
-        int maxY = grid[0].length - 1;
-        int midX = maxX / 2;
-        int midY = maxY / 2;
-
-        Tile[] waypoints = {
-            grid[0][0],
-            grid[maxX][0],
-            grid[maxX][maxY],
-            grid[0][maxY],
-            grid[midX][midY],
-        };
-
-        Tile currentTarget = Tile.findNearest(agent.targetLocation);
-        int currentIdx = 0;
-        for (int i = 0; i < waypoints.length; i++) {
-            if (currentTarget != null && waypoints[i].id.equals(currentTarget.id)) {
-                currentIdx = i;
-                break;
-            }
-        }
-
-        int stride = 1 + (int) (agent.id % 2);
-        Tile next = waypoints[(currentIdx + stride) % waypoints.length];
-        agent.targetLocation = next.location;
-    }
-
-    private static Tile[][] gridBounds() {
-        int width = 0;
-        int height = 0;
-        for (Tile tile : Tile.all()) {
-            width = Math.max(width, tile.x + 1);
-            height = Math.max(height, tile.y + 1);
-        }
-        if (width == 0 || height == 0) {
-            return null;
-        }
-
-        Tile[][] grid = new Tile[width][height];
-        for (Tile tile : Tile.all()) {
-            grid[tile.x][tile.y] = tile;
-        }
-        return grid;
     }
 }

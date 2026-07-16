@@ -1,10 +1,24 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Application, Container, Graphics } from 'pixi.js'
 
 const TILE_SIZE = 20
 const API_URL = 'http://localhost:8080/world/state'
+const INVENTORY_CAPACITY = 10
+const AGENT_HIT_RADIUS = 0.45
 
 const AGENT_COLORS = [0x3366ff, 0xff6633, 0x33cc66, 0xcc33ff, 0xffcc33]
+
+const RESOURCE_COLORS: Record<string, number> = {
+  WOOD: 0x2e7d32,
+  GOLD: 0xc9a227,
+  FOOD: 0xd35400,
+}
+
+const JOB_RESOURCE: Record<string, string> = {
+  LUMBERJACK: 'WOOD',
+  MINER: 'GOLD',
+  TRADER: 'FOOD',
+}
 
 interface Coord {
   x: number
@@ -17,6 +31,8 @@ interface Tile {
   y: number
   terrainType: string
   location: Coord
+  resourceType: string | null
+  quantity: number
 }
 
 interface Agent {
@@ -26,6 +42,8 @@ interface Agent {
   speed: number
   targetLocation: Coord | null
   path: Coord[]
+  job: string | null
+  inventory: Record<string, number>
 }
 
 interface WorldState {
@@ -41,24 +59,134 @@ interface AgentSprite {
 
 interface ViewportProps {
   showPaths: boolean
+  onConnectionChange?: (connected: boolean) => void
+}
+
+interface TooltipState {
+  x: number
+  y: number
+  lines: string[]
 }
 
 function agentColor(id: number): number {
   return AGENT_COLORS[id % AGENT_COLORS.length]!
 }
 
-export default function Viewport({ showPaths }: ViewportProps) {
+function tileColor(tile: Tile): number {
+  if (tile.terrainType === 'mountain') {
+    return 0x444444
+  }
+  if (tile.terrainType === 'city') {
+    return 0x5c6bc0
+  }
+  if (tile.resourceType && tile.quantity > 0) {
+    return RESOURCE_COLORS[tile.resourceType] ?? 0x888888
+  }
+  return 0x888888
+}
+
+function inventoryCount(agent: Agent): number {
+  return Object.values(agent.inventory ?? {}).reduce((sum, n) => sum + n, 0)
+}
+
+function formatInventory(agent: Agent): string {
+  const entries = Object.entries(agent.inventory ?? {}).filter(([, n]) => n > 0)
+  if (entries.length === 0) {
+    return 'empty'
+  }
+  return entries.map(([type, n]) => `${type} ${n}`).join(', ')
+}
+
+function tileAt(tiles: Tile[], gridX: number, gridY: number): Tile | undefined {
+  return tiles.find((tile) => tile.x === gridX && tile.y === gridY)
+}
+
+function describeAgentActivity(agent: Agent, tiles: Tile[], displayPos: Coord): string {
+  const gridX = Math.floor(displayPos.x)
+  const gridY = Math.floor(displayPos.y)
+  const underfoot = tileAt(tiles, gridX, gridY)
+  const jobResource = agent.job ? JOB_RESOURCE[agent.job] : null
+  const count = inventoryCount(agent)
+  const full = count >= INVENTORY_CAPACITY
+
+  const targetTile = agent.targetLocation
+    ? tileAt(
+        tiles,
+        Math.floor(agent.targetLocation.x),
+        Math.floor(agent.targetLocation.y),
+      )
+    : undefined
+
+  if (
+    underfoot?.resourceType &&
+    underfoot.quantity > 0 &&
+    underfoot.resourceType === jobResource &&
+    !full
+  ) {
+    return `Harvesting ${underfoot.resourceType}`
+  }
+
+  if (underfoot?.terrainType === 'city' && count > 0) {
+    return 'Depositing at city'
+  }
+
+  if (full || targetTile?.terrainType === 'city') {
+    return 'Delivering to city'
+  }
+
+  if (targetTile?.resourceType) {
+    return `Traveling to gather ${targetTile.resourceType}`
+  }
+
+  if (jobResource) {
+    return `Seeking ${jobResource}`
+  }
+
+  return 'Idle'
+}
+
+function describeTile(tile: Tile): string[] {
+  const lines = [`Tile (${tile.x}, ${tile.y})`]
+  if (tile.terrainType === 'city') {
+    lines.push('City')
+  } else if (tile.terrainType === 'mountain') {
+    lines.push('Mountain (impassable)')
+  } else {
+    lines.push('Grass')
+  }
+  if (tile.resourceType && tile.quantity > 0) {
+    lines.push(`Resource: ${tile.resourceType}`)
+    lines.push(`Quantity: ${tile.quantity}`)
+  }
+  return lines
+}
+
+function describeAgent(agent: Agent, tiles: Tile[], displayPos: Coord): string[] {
+  return [
+    `Agent: ${agent.name}`,
+    `Job: ${agent.job ?? 'none'}`,
+    `Activity: ${describeAgentActivity(agent, tiles, displayPos)}`,
+    `Inventory: ${formatInventory(agent)} (${inventoryCount(agent)}/${INVENTORY_CAPACITY})`,
+  ]
+}
+
+export default function Viewport({ showPaths, onConnectionChange }: ViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const appRef = useRef<Application | null>(null)
   const pathsLayerRef = useRef<Container | null>(null)
   const destLayerRef = useRef<Container | null>(null)
   const agentsLayerRef = useRef<Container | null>(null)
+  const tileGfxRef = useRef<Map<number, Graphics>>(new Map())
   const agentSpritesRef = useRef<Map<number, AgentSprite>>(new Map())
   const tilesDrawnRef = useRef(false)
   const showPathsRef = useRef(showPaths)
   const lastAgentsRef = useRef<Agent[]>([])
+  const lastTilesRef = useRef<Tile[]>([])
+  const onConnectionChangeRef = useRef(onConnectionChange)
+  const [tooltip, setTooltip] = useState<TooltipState | null>(null)
 
   showPathsRef.current = showPaths
+  onConnectionChangeRef.current = onConnectionChange
 
   const updatePaths = (agents: Agent[]) => {
     const pathsLayer = pathsLayerRef.current
@@ -150,6 +278,7 @@ export default function Viewport({ showPaths }: ViewportProps) {
       pathsLayerRef.current = null
       destLayerRef.current = null
       agentsLayerRef.current = null
+      tileGfxRef.current.clear()
       agentSpritesRef.current.clear()
       tilesDrawnRef.current = false
     }
@@ -159,7 +288,13 @@ export default function Viewport({ showPaths }: ViewportProps) {
     const fetchState = async () => {
       try {
         const res = await fetch(API_URL)
+        if (!res.ok) {
+          onConnectionChangeRef.current?.(false)
+          return
+        }
         const state = (await res.json()) as WorldState
+        onConnectionChangeRef.current?.(true)
+
         const app = appRef.current
         const agentsLayer = agentsLayerRef.current
         if (!app || !agentsLayer) return
@@ -168,12 +303,21 @@ export default function Viewport({ showPaths }: ViewportProps) {
           for (const tile of state.tiles) {
             const gfx = new Graphics()
             gfx.rect(0, 0, TILE_SIZE, TILE_SIZE)
-            gfx.fill(tile.terrainType === 'mountain' ? 0x444444 : 0x888888)
+            gfx.fill(tileColor(tile))
             gfx.x = tile.x * TILE_SIZE
             gfx.y = tile.y * TILE_SIZE
+            tileGfxRef.current.set(tile.id, gfx)
             app.stage.addChildAt(gfx, 0)
           }
           tilesDrawnRef.current = true
+        } else {
+          for (const tile of state.tiles) {
+            const gfx = tileGfxRef.current.get(tile.id)
+            if (!gfx) continue
+            gfx.clear()
+            gfx.rect(0, 0, TILE_SIZE, TILE_SIZE)
+            gfx.fill(tileColor(tile))
+          }
         }
 
         const seen = new Set<number>()
@@ -213,9 +357,10 @@ export default function Viewport({ showPaths }: ViewportProps) {
         }
 
         lastAgentsRef.current = state.agents
+        lastTilesRef.current = state.tiles
         updatePaths(state.agents)
-      } catch (err) {
-        console.error('Failed to fetch world state', err)
+      } catch {
+        onConnectionChangeRef.current?.(false)
       }
     }
 
@@ -228,5 +373,84 @@ export default function Viewport({ showPaths }: ViewportProps) {
     updatePaths(lastAgentsRef.current)
   }, [showPaths])
 
-  return <div ref={containerRef} className="viewport" />
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    const onMove = (event: MouseEvent) => {
+      const rect = el.getBoundingClientRect()
+      const localX = event.clientX - rect.left
+      const localY = event.clientY - rect.top
+      const worldX = localX / TILE_SIZE
+      const worldY = localY / TILE_SIZE
+
+      const agents = lastAgentsRef.current
+      const tiles = lastTilesRef.current
+      if (tiles.length === 0) {
+        setTooltip(null)
+        return
+      }
+
+      let closest: { agent: Agent; pos: Coord; dist: number } | null = null
+      for (const agent of agents) {
+        const sprite = agentSpritesRef.current.get(agent.id)
+        const pos = sprite?.current ?? agent.location
+        const dx = pos.x - worldX
+        const dy = pos.y - worldY
+        const dist = Math.hypot(dx, dy)
+        if (dist <= AGENT_HIT_RADIUS && (!closest || dist < closest.dist)) {
+          closest = { agent, pos, dist }
+        }
+      }
+
+      if (closest) {
+        setTooltip({
+          x: event.clientX + 14,
+          y: event.clientY + 14,
+          lines: describeAgent(closest.agent, tiles, closest.pos),
+        })
+        return
+      }
+
+      const gridX = Math.floor(worldX)
+      const gridY = Math.floor(worldY)
+      const tile = tileAt(tiles, gridX, gridY)
+      if (!tile) {
+        setTooltip(null)
+        return
+      }
+
+      setTooltip({
+        x: event.clientX + 14,
+        y: event.clientY + 14,
+        lines: describeTile(tile),
+      })
+    }
+
+    const onLeave = () => setTooltip(null)
+
+    el.addEventListener('mousemove', onMove)
+    el.addEventListener('mouseleave', onLeave)
+    return () => {
+      el.removeEventListener('mousemove', onMove)
+      el.removeEventListener('mouseleave', onLeave)
+    }
+  }, [])
+
+  return (
+    <>
+      <div ref={containerRef} className="viewport" />
+      {tooltip && (
+        <div
+          className="map-tooltip"
+          style={{ left: tooltip.x, top: tooltip.y }}
+          role="tooltip"
+        >
+          {tooltip.lines.map((line, index) => (
+            <div key={index}>{line}</div>
+          ))}
+        </div>
+      )}
+    </>
+  )
 }

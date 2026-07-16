@@ -1,10 +1,13 @@
 package worldsim.dto;
 
 import worldsim.Agent;
+import worldsim.ResourceType;
 import worldsim.Tile;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public record AgentDto(
         long id,
@@ -12,7 +15,9 @@ public record AgentDto(
         CoordDto location,
         double speed,
         CoordDto targetLocation,
-        List<CoordDto> path) {
+        List<CoordDto> path,
+        String job,
+        Map<String, Integer> inventory) {
     public static AgentDto from(Agent agent) {
         List<CoordDto> path = new ArrayList<>();
         if (agent.location != null) {
@@ -25,13 +30,23 @@ public record AgentDto(
         if (target != null && (path.isEmpty() || !coordsEqual(path.get(path.size() - 1), target))) {
             path.add(target);
         }
+
+        Map<String, Integer> inventoryJson = new LinkedHashMap<>();
+        if (agent.inventory != null) {
+            for (Map.Entry<ResourceType, Integer> entry : agent.inventory.entrySet()) {
+                inventoryJson.put(entry.getKey().name(), entry.getValue());
+            }
+        }
+
         return new AgentDto(
                 agent.id,
                 agent.name,
                 CoordDto.from(agent.location),
                 agent.speed,
                 target,
-                path);
+                path,
+                agent.job != null ? agent.job.name() : null,
+                inventoryJson);
     }
 
     private static boolean coordsEqual(CoordDto a, CoordDto b) {
