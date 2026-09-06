@@ -2,18 +2,19 @@
 
 ## `GET /world/map`
 
-Load once when the viewer starts. Returns map size plus **non-grass** tiles only (mountains, cities, biome patches) so a 100×100 world stays compact.
+Load once when the viewer starts. Returns map size plus **non-grass** tiles (water, mountains, cities, biome patches, roads) so a 200×200 world stays compact.
 
 ```json
 {
-  "width": 100,
-  "height": 100,
+  "width": 200,
+  "height": 200,
   "tiles": [
     {
       "id": 1,
       "x": 15,
       "y": 15,
       "terrainType": "city",
+      "infrastructureType": "none",
       "location": { "x": 15.5, "y": 15.5 },
       "resourceType": null,
       "quantity": 0,
@@ -64,6 +65,7 @@ Richer agent snapshot for tooltips and the path overlay. The viewer loads this l
       "name": "Worker-1",
       "job": "LUMBERJACK",
       "tradeResource": null,
+      "vehicleType": null,
       "inventory": { "WOOD": 3 },
       "location": { "x": 10.5, "y": 12.5 },
       "speed": 1.0,

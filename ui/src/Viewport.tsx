@@ -8,6 +8,7 @@ const LIVE_URL = 'ws://localhost:8080/world/live'
 const META_INTERVAL_MS = 2000
 const MAP_REFRESH_MS = 8000
 const INVENTORY_CAPACITY = 10
+const WAGON_CAPACITY = 20
 const AGENT_HIT_RADIUS = 0.55
 const PATH_HIT_RADIUS = 0.45
 const NPC_TEX_SIZE = 32
@@ -27,7 +28,8 @@ const RESOURCE_COLORS: Record<string, number> = {
 }
 
 const TERRAIN_COLORS: Record<string, number> = {
-  mountain: 0x444444,
+  water: 0x1f6aa5,
+  mountain: 0x5a5a5a,
   city: 0x5c6bc0,
   forest: 0x1b5e20,
   farm: 0xa1887f,
@@ -37,8 +39,16 @@ const TERRAIN_COLORS: Record<string, number> = {
   meadow: 0x7cb342,
 }
 
+const INFRA_COLORS: Record<string, number> = {
+  road: 0xe0c07a,
+  bridge: 0x6d4c41,
+  village: 0xc9844a,
+  harbor: 0x3d7a8c,
+}
+
 const TERRAIN_LABELS: Record<string, string> = {
   grass: 'Grass',
+  water: 'Water (bridge or boat)',
   mountain: 'Mountain (impassable)',
   city: 'City',
   forest: 'Forest',
@@ -68,6 +78,7 @@ interface Tile {
   x: number
   y: number
   terrainType: string
+  infrastructureType?: string | null
   location: Coord
   resourceType: string | null
   quantity: number
@@ -83,6 +94,8 @@ interface Agent {
   path: Coord[]
   job: string | null
   tradeResource?: string | null
+  vehicleType?: string | null
+  capacity?: number
   inventory: Record<string, number>
 }
 
@@ -103,6 +116,8 @@ interface CityMarket {
   name: string
   x: number
   y: number
+  harbor?: boolean
+  boatStock?: number
   listings: MarketListing[]
 }
 
@@ -110,6 +125,7 @@ interface WorldState {
   agents: Agent[]
   tick?: TickStats
   cities?: CityMarket[]
+  vehicles?: { id: number; type: string; location: Coord; occupantId?: number | null }[]
 }
 
 interface AgentPos {
@@ -214,6 +230,19 @@ function syncAgentColors(
 }
 
 function tileColor(tile: Tile): number {
+  const infra = tile.infrastructureType
+  if (infra === 'harbor') {
+    return INFRA_COLORS.harbor
+  }
+  if (infra === 'village') {
+    return INFRA_COLORS.village
+  }
+  if (infra === 'bridge') {
+    return INFRA_COLORS.bridge
+  }
+  if (infra === 'road') {
+    return INFRA_COLORS.road
+  }
   if (tile.terrainType === 'quarry' || tile.resourceType === 'STONE') {
     return STONE_COLOR
   }
@@ -235,6 +264,27 @@ function formatInventory(agent: Agent): string {
   return entries.map(([type, n]) => `${type} ${n}`).join(', ')
 }
 
+function agentCapacity(agent: Agent): number {
+  return agent.capacity ?? (agent.vehicleType === 'WAGON' ? WAGON_CAPACITY : INVENTORY_CAPACITY)
+}
+
+function xyKey(x: number, y: number): number {
+  return (x << 16) | (y & 0xffff)
+}
+
+function isHarvestingOn(agent: Agent, tile: Tile | undefined): boolean {
+  if (!tile?.resourceType || tile.quantity <= 0) {
+    return false
+  }
+  if (!agent.job || agent.job === 'TRADER') {
+    return false
+  }
+  if (inventoryCount(agent) >= agentCapacity(agent)) {
+    return false
+  }
+  return JOB_RESOURCE[agent.job] === tile.resourceType
+}
+
 function tileAt(tiles: Tile[], gridX: number, gridY: number): Tile | undefined {
   return tiles.find((tile) => tile.x === gridX && tile.y === gridY)
 }
@@ -243,7 +293,7 @@ function describeAgentActivity(agent: Agent, tiles: Tile[], displayPos: Coord): 
   const underfoot = tileAt(tiles, Math.floor(displayPos.x), Math.floor(displayPos.y))
   const jobResource = agent.job ? JOB_RESOURCE[agent.job] : null
   const count = inventoryCount(agent)
-  const full = count >= INVENTORY_CAPACITY
+  const full = count >= agentCapacity(agent)
   const targetTile = agent.targetLocation
     ? tileAt(tiles, Math.floor(agent.targetLocation.x), Math.floor(agent.targetLocation.y))
     : undefined
@@ -368,7 +418,16 @@ function describeTile(tile: Tile, cities: CityMarket[] = []): string[] {
   const lines = [`Tile (${tile.x}, ${tile.y})`]
   if (tile.terrainType === 'city') {
     const city = cityForTile(tile, cities)
-    lines.push(city ? city.name : 'City')
+    const kind =
+      tile.infrastructureType === 'harbor'
+        ? 'Harbor'
+        : tile.infrastructureType === 'village'
+          ? 'Village'
+          : 'City'
+    lines.push(city ? `${city.name} (${kind})` : kind)
+    if (kind === 'Harbor') {
+      lines.push(`Boats for sale: ${city?.boatStock ?? 0}`)
+    }
     if (city) {
       for (const listing of city.listings) {
         lines.push(`${listing.resource}  ${listing.stock} @ ${listing.price}`)
@@ -377,6 +436,12 @@ function describeTile(tile: Tile, cities: CityMarket[] = []): string[] {
     return lines
   }
   lines.push(TERRAIN_LABELS[tile.terrainType] ?? tile.terrainType)
+  if (tile.infrastructureType === 'road') {
+    lines.push('Road (fast)')
+  }
+  if (tile.infrastructureType === 'bridge') {
+    lines.push('Bridge')
+  }
   if (tile.resourceType) {
     if (tile.quantity > 0) {
       lines.push(`Resource: ${tile.resourceType}`)
@@ -389,12 +454,18 @@ function describeTile(tile: Tile, cities: CityMarket[] = []): string[] {
 }
 
 function describeAgent(agent: Agent, tiles: Tile[], displayPos: Coord): string[] {
-  return [
+  const lines = [
     `Agent: ${agent.name}`,
     `Job: ${agent.job ?? 'none'}`,
     `Activity: ${describeAgentActivity(agent, tiles, displayPos)}`,
-    `Inventory: ${formatInventory(agent)} (${inventoryCount(agent)}/${INVENTORY_CAPACITY})`,
+    `Inventory: ${formatInventory(agent)} (${inventoryCount(agent)}/${agentCapacity(agent)})`,
   ]
+  if (agent.vehicleType === 'BOAT') {
+    lines.push('In a boat')
+  } else if (agent.vehicleType === 'WAGON') {
+    lines.push('In a wagon')
+  }
+  return lines
 }
 
 export default function Viewport({
@@ -411,6 +482,8 @@ export default function Viewport({
   const destLayerRef = useRef<Container | null>(null)
   const pathGfxRef = useRef<Graphics | null>(null)
   const destGfxRef = useRef<Graphics | null>(null)
+  const harvestGfxRef = useRef<Graphics | null>(null)
+  const tileByXYRef = useRef<Map<number, Tile>>(new Map())
   const agentsLayerRef = useRef<ParticleContainer | null>(null)
   const npcTextureRef = useRef<Texture | null>(null)
   const lastCamScaleRef = useRef(0)
@@ -425,11 +498,12 @@ export default function Viewport({
   const lastAgentsRef = useRef<Agent[]>([])
   const lastTilesRef = useRef<Tile[]>([])
   const lastCitiesRef = useRef<CityMarket[]>([])
-  const mapSizeRef = useRef({ width: 100, height: 100 })
+  const mapSizeRef = useRef({ width: 200, height: 200 })
   const onConnectionChangeRef = useRef(onConnectionChange)
   const onTickStatsRef = useRef(onTickStats)
   const onFpsRef = useRef(onFps)
   const updatePathsRef = useRef<(agents: Agent[]) => void>(() => {})
+  const updateHarvestOverlayRef = useRef<() => void>(() => {})
   const cameraRef = useRef({ x: 0, y: 0, scale: 1 })
   const dragRef = useRef<{ active: boolean; lastX: number; lastY: number }>({
     active: false,
@@ -444,6 +518,35 @@ export default function Viewport({
   onTickStatsRef.current = onTickStats
   onFpsRef.current = onFps
 
+  const viewBounds = (padTiles = 2) => {
+    const app = appRef.current
+    const cam = cameraRef.current
+    const { width, height } = mapSizeRef.current
+    if (!app) {
+      return { x0: 0, y0: 0, x1: width, y1: height }
+    }
+    const scale = Math.max(cam.scale, 0.0001)
+    return {
+      x0: Math.floor(-cam.x / (TILE_SIZE * scale)) - padTiles,
+      y0: Math.floor(-cam.y / (TILE_SIZE * scale)) - padTiles,
+      x1: Math.ceil((app.screen.width - cam.x) / (TILE_SIZE * scale)) + padTiles,
+      y1: Math.ceil((app.screen.height - cam.y) / (TILE_SIZE * scale)) + padTiles,
+    }
+  }
+
+  const inView = (
+    x: number,
+    y: number,
+    view: { x0: number; y0: number; x1: number; y1: number },
+  ) => x >= view.x0 && x <= view.x1 && y >= view.y0 && y <= view.y1
+
+  const applyTileCulling = () => {
+    const view = viewBounds(3)
+    for (const gfx of tileGfxRef.current.values()) {
+      gfx.visible = inView(gfx.x / TILE_SIZE, gfx.y / TILE_SIZE, view)
+    }
+  }
+
   const applyCamera = () => {
     const world = worldRef.current
     if (!world) return
@@ -453,7 +556,9 @@ export default function Viewport({
     if (cam.scale !== lastCamScaleRef.current) {
       lastCamScaleRef.current = cam.scale
       applyNpcLod()
+      updateHarvestOverlayRef.current()
     }
+    applyTileCulling()
   }
 
   const applyNpcLod = () => {
@@ -477,13 +582,22 @@ export default function Viewport({
     destGfx.clear()
     if (!showPathsRef.current) return
 
+    const view = viewBounds(24)
     for (const agent of agents) {
       const color = agentColor(agent.job)
       const sprite = agentSpritesRef.current.get(agent.id)
       // Use the live tile, not the interpolating sprite — otherwise the trail
       // sits on the previous tile after each 1s step.
       const from = sprite?.target ?? agent.location
-      const points = remainingPath(from, agent.path ?? [])
+      const path = agent.path ?? []
+      if (
+        !inView(from.x, from.y, view)
+        && !path.some((point) => inView(point.x, point.y, view))
+        && !(agent.targetLocation && inView(agent.targetLocation.x, agent.targetLocation.y, view))
+      ) {
+        continue
+      }
+      const points = remainingPath(from, path)
       if (points.length >= 2) {
         pathGfx.moveTo(points[0]!.x * TILE_SIZE, points[0]!.y * TILE_SIZE)
         for (let i = 1; i < points.length; i++) {
@@ -512,6 +626,45 @@ export default function Viewport({
 
   updatePathsRef.current = updatePaths
 
+  const indexTiles = (tiles: Tile[]) => {
+    const byXY = new Map<number, Tile>()
+    for (const tile of tiles) {
+      byXY.set(xyKey(tile.x, tile.y), tile)
+    }
+    tileByXYRef.current = byXY
+  }
+
+  const updateHarvestOverlay = () => {
+    const harvestGfx = harvestGfxRef.current
+    if (!harvestGfx) return
+
+    harvestGfx.clear()
+    const tiles = tileByXYRef.current
+    const seen = new Set<number>()
+    const stroke = 1 / Math.max(cameraRef.current.scale, 0.25)
+    const pad = stroke / 2
+    const size = TILE_SIZE - stroke
+    if (size <= 0) return
+
+    let any = false
+    for (const agent of lastAgentsRef.current) {
+      const gx = Math.floor(agent.location.x)
+      const gy = Math.floor(agent.location.y)
+      const tile = tiles.get(xyKey(gx, gy))
+      if (!tile || seen.has(tile.id) || !isHarvestingOn(agent, tile)) {
+        continue
+      }
+      seen.add(tile.id)
+      harvestGfx.rect(tile.x * TILE_SIZE + pad, tile.y * TILE_SIZE + pad, size, size)
+      any = true
+    }
+    if (any) {
+      harvestGfx.stroke({ width: stroke, color: 0x000000, alpha: 0.95 })
+    }
+  }
+
+  updateHarvestOverlayRef.current = updateHarvestOverlay
+
   const drawMap = (map: MapState) => {
     const tilesLayer = tilesLayerRef.current
     const world = worldRef.current
@@ -523,7 +676,7 @@ export default function Viewport({
 
     const ground = new Graphics()
     ground.rect(0, 0, map.width * TILE_SIZE, map.height * TILE_SIZE)
-    ground.fill(0x888888)
+    ground.fill(0x7a9e54)
     tilesLayer.addChild(ground)
 
     for (const tile of map.tiles) {
@@ -540,6 +693,7 @@ export default function Viewport({
 
     mapSizeRef.current = { width: map.width, height: map.height }
     lastTilesRef.current = map.tiles
+    indexTiles(map.tiles)
     mapLoadedRef.current = true
     lastMapFetchRef.current = performance.now()
 
@@ -553,10 +707,11 @@ export default function Viewport({
       cameraRef.current.scale = Math.max(0.35, Math.min(fit * 0.95, 1.5))
       cameraRef.current.x =
         (app.screen.width - map.width * TILE_SIZE * cameraRef.current.scale) / 2
-      cameraRef.current.y =
+        cameraRef.current.y =
         (app.screen.height - map.height * TILE_SIZE * cameraRef.current.scale) / 2
       applyCamera()
     }
+    updateHarvestOverlay()
   }
 
   const updateResourceTiles = (tiles: Tile[]) => {
@@ -589,6 +744,8 @@ export default function Viewport({
         tileFillRef.current.delete(id)
       }
     }
+    applyTileCulling()
+    updateHarvestOverlay()
   }
 
   useEffect(() => {
@@ -631,9 +788,11 @@ export default function Viewport({
       })
       const pathGfx = new Graphics()
       const destGfx = new Graphics()
+      const harvestGfx = new Graphics()
       pathsLayer.addChild(pathGfx)
       destLayer.addChild(destGfx)
       world.addChild(tilesLayer)
+      world.addChild(harvestGfx)
       world.addChild(pathsLayer)
       world.addChild(destLayer)
       world.addChild(agentsLayer)
@@ -645,6 +804,7 @@ export default function Viewport({
       destLayerRef.current = destLayer
       pathGfxRef.current = pathGfx
       destGfxRef.current = destGfx
+      harvestGfxRef.current = harvestGfx
       agentsLayerRef.current = agentsLayer
       npcTextureRef.current = npcTexture
 
@@ -661,16 +821,22 @@ export default function Viewport({
           fpsStampRef.current = now
         }
 
+        const npcView = viewBounds(4)
         for (const sprite of agentSpritesRef.current.values()) {
           const dx = sprite.target.x - sprite.current.x
           const dy = sprite.target.y - sprite.current.y
-          if (Math.abs(dx) <= 0.0005 && Math.abs(dy) <= 0.0005) {
-            continue
+          if (Math.abs(dx) > 0.0005 || Math.abs(dy) > 0.0005) {
+            sprite.current.x += dx * 0.25
+            sprite.current.y += dy * 0.25
           }
-          sprite.current.x += dx * 0.25
-          sprite.current.y += dy * 0.25
-          sprite.particle.x = sprite.current.x * TILE_SIZE
-          sprite.particle.y = sprite.current.y * TILE_SIZE
+          const view = npcView
+          if (inView(sprite.current.x, sprite.current.y, view)) {
+            sprite.particle.x = sprite.current.x * TILE_SIZE
+            sprite.particle.y = sprite.current.y * TILE_SIZE
+          } else {
+            sprite.particle.x = -9999
+            sprite.particle.y = -9999
+          }
         }
       })
     })()
@@ -704,15 +870,20 @@ export default function Viewport({
           return
         }
         const map = (await res.json()) as MapState
-        if (appRef.current && tilesLayerRef.current) {
-          drawMap(map)
-        } else {
-          // App may still be initializing — retry shortly.
-          setTimeout(() => {
-            if (appRef.current && tilesLayerRef.current && !mapLoadedRef.current) {
-              drawMap(map)
+        const tryDraw = () => {
+          if (appRef.current && tilesLayerRef.current && !mapLoadedRef.current) {
+            drawMap(map)
+            return true
+          }
+          return mapLoadedRef.current
+        }
+        if (!tryDraw()) {
+          const started = performance.now()
+          const timer = window.setInterval(() => {
+            if (tryDraw() || performance.now() - started > 8000) {
+              window.clearInterval(timer)
             }
-          }, 200)
+          }, 100)
         }
       } catch {
         // Map retry is independent of the live socket.
@@ -796,6 +967,7 @@ export default function Viewport({
       }
 
       lastAgentsRef.current = nextAgents
+      updateHarvestOverlayRef.current()
       if (showPathsRef.current) {
         updatePathsRef.current(nextAgents)
       }
@@ -844,7 +1016,12 @@ export default function Viewport({
         if (!res.ok) return
         const state = (await res.json()) as WorldState
 
-        if (mapLoadedRef.current) {
+        if (!mapLoadedRef.current) {
+          const mapRes = await fetch(MAP_URL)
+          if (mapRes.ok && appRef.current && tilesLayerRef.current) {
+            drawMap((await mapRes.json()) as MapState)
+          }
+        } else {
           const now = performance.now()
           if (now - lastMapFetchRef.current >= MAP_REFRESH_MS) {
             lastMapFetchRef.current = now
@@ -852,6 +1029,7 @@ export default function Viewport({
             if (mapRes.ok) {
               const map = (await mapRes.json()) as MapState
               lastTilesRef.current = map.tiles
+              indexTiles(map.tiles)
               updateResourceTiles(map.tiles)
             }
           }
@@ -869,6 +1047,7 @@ export default function Viewport({
         lastCitiesRef.current = state.cities ?? []
         syncAgentColors(lastAgentsRef.current, agentSpritesRef.current, agentsLayerRef.current)
         updatePaths(lastAgentsRef.current)
+        updateHarvestOverlay()
       } catch {
         // Live positions still come from the WebSocket.
       }
@@ -899,6 +1078,7 @@ export default function Viewport({
         lastCitiesRef.current = state.cities ?? []
         syncAgentColors(lastAgentsRef.current, agentSpritesRef.current, agentsLayerRef.current)
         updatePaths(lastAgentsRef.current)
+        updateHarvestOverlay()
       } catch {
         // ignore
       }

@@ -14,6 +14,9 @@ public class Tile extends PanacheEntity {
     public int x;
     public int y;
     public String terrainType;
+    public String infrastructureType = InfrastructureType.NONE.code();
+    public double movementCost = 1.0;
+    public boolean navigableByBoat;
 
     @Column(columnDefinition = "geometry(Point, 4326)")
     public Point location;
@@ -27,7 +30,14 @@ public class Tile extends PanacheEntity {
     public Long cityId;
 
     public boolean isPassable() {
+        if (InfrastructureType.is(infrastructureType, InfrastructureType.BRIDGE)) {
+            return true;
+        }
         return TerrainType.isPassable(terrainType);
+    }
+
+    public boolean isNavigableByBoat() {
+        return navigableByBoat;
     }
 
     public boolean hasResource() {
@@ -36,6 +46,65 @@ public class Tile extends PanacheEntity {
 
     public boolean isCity() {
         return TerrainType.CITY.code().equals(terrainType);
+    }
+
+    public boolean isVillage() {
+        return InfrastructureType.is(infrastructureType, InfrastructureType.VILLAGE)
+                || InfrastructureType.is(infrastructureType, InfrastructureType.HARBOR);
+    }
+
+    public boolean isHarbor() {
+        return InfrastructureType.is(infrastructureType, InfrastructureType.HARBOR);
+    }
+
+    public static double boatMovementCostOf(String terrainType, String infrastructureType) {
+        if (TerrainType.MOUNTAIN.code().equals(terrainType)) {
+            return 1_000_000.0;
+        }
+        if (TerrainType.WATER.code().equals(terrainType)) {
+            return 0.5;
+        }
+        if (InfrastructureType.is(infrastructureType, InfrastructureType.ROAD)) {
+            return 0.5;
+        }
+        return 1.0;
+    }
+
+    public static double wagonMovementCostOf(String terrainType, String infrastructureType) {
+        if (InfrastructureType.is(infrastructureType, InfrastructureType.BRIDGE)) {
+            return 1.0;
+        }
+        if (InfrastructureType.is(infrastructureType, InfrastructureType.ROAD)) {
+            return 0.35;
+        }
+        if (TerrainType.WATER.code().equals(terrainType) || TerrainType.MOUNTAIN.code().equals(terrainType)) {
+            return 1_000_000.0;
+        }
+        return 1.0;
+    }
+
+    /**
+     * Walker cost from terrain + infrastructure. Roads are fast; water is blocked unless bridged.
+     */
+    public static double movementCostOf(String terrainType, String infrastructureType) {
+        if (InfrastructureType.is(infrastructureType, InfrastructureType.BRIDGE)) {
+            return 1.0;
+        }
+        if (InfrastructureType.is(infrastructureType, InfrastructureType.ROAD)) {
+            return 0.5;
+        }
+        if (TerrainType.WATER.code().equals(terrainType) || TerrainType.MOUNTAIN.code().equals(terrainType)) {
+            return 1_000_000.0;
+        }
+        return 1.0;
+    }
+
+    public void refreshTraversal() {
+        if (infrastructureType == null || infrastructureType.isBlank()) {
+            infrastructureType = InfrastructureType.NONE.code();
+        }
+        navigableByBoat = TerrainType.WATER.code().equals(terrainType);
+        movementCost = movementCostOf(terrainType, infrastructureType);
     }
 
     public static Tile findNearest(Point point) {

@@ -40,6 +40,9 @@ public class Agent extends PanacheEntity {
     @Column(name = "trade_resource")
     public ResourceType tradeResource;
 
+    @Column(name = "vehicle_id")
+    public Long vehicleId;
+
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "agent_inventory", joinColumns = @JoinColumn(name = "agent_id"))
     @MapKeyEnumerated(EnumType.STRING)
@@ -64,8 +67,30 @@ public class Agent extends PanacheEntity {
         return inventory.getOrDefault(type, 0);
     }
 
+    public int inventoryCapacity() {
+        if (vehicleId == null) {
+            return BehaviorService.INVENTORY_CAPACITY;
+        }
+        Vehicle vehicle = Vehicle.findById(vehicleId);
+        if (vehicle != null && vehicle.type == VehicleType.WAGON) {
+            return BehaviorService.WAGON_CAPACITY;
+        }
+        return BehaviorService.INVENTORY_CAPACITY;
+    }
+
     public boolean isInventoryFull() {
-        return inventoryCount() >= BehaviorService.INVENTORY_CAPACITY;
+        return inventoryCount() >= inventoryCapacity();
+    }
+
+    public boolean hasVehicle() {
+        return vehicleId != null;
+    }
+
+    public MovementMode movementMode(Vehicle vehicle) {
+        if (vehicle == null || vehicleId == null || !vehicle.id.equals(vehicleId)) {
+            return MovementMode.WALK;
+        }
+        return MovementMode.of(vehicle.type);
     }
 
     public void clearInventory() {

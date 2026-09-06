@@ -7,8 +7,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * One-tick snapshot of patches, claims, cities, and markets so AI can pick goals
@@ -23,12 +25,29 @@ final class GoalIndex {
     private final Map<ResourceType, List<Patch>> patches;
     private final Map<Long, Integer> claimed;
     private final List<Market> markets;
+    private final List<City> cities;
+    private final List<City> harbors;
+    private final Set<Long> cityTiles;
+    private final Set<Long> openWater;
+    private final Map<Long, VehicleType> vehiclesByAgent;
 
     private GoalIndex(
-            Map<ResourceType, List<Patch>> patches, Map<Long, Integer> claimed, List<Market> markets) {
+            Map<ResourceType, List<Patch>> patches,
+            Map<Long, Integer> claimed,
+            List<Market> markets,
+            List<City> cities,
+            List<City> harbors,
+            Set<Long> cityTiles,
+            Set<Long> openWater,
+            Map<Long, VehicleType> vehiclesByAgent) {
         this.patches = patches;
         this.claimed = claimed;
         this.markets = markets;
+        this.cities = cities;
+        this.harbors = harbors;
+        this.cityTiles = cityTiles;
+        this.openWater = openWater;
+        this.vehiclesByAgent = vehiclesByAgent;
     }
 
     @SuppressWarnings("unchecked")
@@ -65,7 +84,42 @@ final class GoalIndex {
         }
 
         ensureTileIds(entityManager);
-        return new GoalIndex(patches, claimed, Market.all());
+
+        Set<Long> cityTiles = new HashSet<>();
+        List<Object[]> cityRows = entityManager.createNativeQuery("""
+                        SELECT x, y FROM tile WHERE terraintype = 'city'
+                        """)
+                .getResultList();
+        for (Object[] row : cityRows) {
+            cityTiles.add(key(((Number) row[0]).intValue(), ((Number) row[1]).intValue()));
+        }
+        Set<Long> openWater = new HashSet<>();
+        List<Object[]> waterRows = entityManager.createNativeQuery("""
+                        SELECT x, y FROM tile
+                        WHERE terraintype = 'water'
+                          AND infrastructuretype IS DISTINCT FROM 'bridge'
+                        """)
+                .getResultList();
+        for (Object[] row : waterRows) {
+            openWater.add(key(((Number) row[0]).intValue(), ((Number) row[1]).intValue()));
+        }
+
+        List<City> cities = City.all();
+        List<City> harbors = new ArrayList<>();
+        for (City city : cities) {
+            if (city.harbor) {
+                harbors.add(city);
+            }
+        }
+
+        Map<Long, VehicleType> vehiclesByAgent = new HashMap<>();
+        for (Vehicle vehicle : Vehicle.all()) {
+            if (vehicle.occupantId != null && vehicle.type != null) {
+                vehiclesByAgent.put(vehicle.occupantId, vehicle.type);
+            }
+        }
+        return new GoalIndex(
+                patches, claimed, Market.all(), cities, harbors, cityTiles, openWater, vehiclesByAgent);
     }
 
     static void clearTileIds() {
@@ -98,6 +152,17 @@ final class GoalIndex {
         if (agent.job == null || agent.location == null) {
             return false;
         }
+        if (!vehiclesByAgent.containsKey(agent.id) && atHarbor(agent)) {
+            City here = harborAt(agent);
+            if (here != null && here.boatStock > 0) {
+                return false;
+            }
+            City stocked = nearestStockedHarbor(agent);
+            if (stocked == null) {
+                return false;
+            }
+            return agent.currentPath == null || agent.currentPath.isEmpty();
+        }
         if (agent.currentPath == null || agent.currentPath.isEmpty()) {
             return true;
         }
@@ -109,12 +174,12 @@ final class GoalIndex {
         if (agent.job.isTrader()) {
             return !isCity(tx, ty);
         }
-        boolean shouldDeliver = agent.inventoryCount() >= BehaviorService.INVENTORY_CAPACITY;
+        boolean shouldDeliver = agent.inventoryCount() >= capacity(agent);
         if (shouldDeliver) {
             return !isCity(tx, ty);
         }
         ResourceType want = agent.job.harvests();
-        int need = BehaviorService.INVENTORY_CAPACITY - agent.inventoryCount();
+        int need = capacity(agent) - agent.inventoryCount();
         Patch patch = patchAt(want, tx, ty);
         return want == null || patch == null || patch.quantity < need;
     }
@@ -131,14 +196,8 @@ final class GoalIndex {
         return null;
     }
 
-    private static boolean isCity(int x, int y) {
-        int radius = WorldConfig.CITY_RADIUS;
-        for (int[] center : WorldConfig.CITY_CENTERS) {
-            if (Math.abs(center[0] - x) <= radius && Math.abs(center[1] - y) <= radius) {
-                return true;
-            }
-        }
-        return false;
+    private boolean isCity(int x, int y) {
+        return cityTiles.contains(key(x, y));
     }
 
     int size() {
@@ -155,13 +214,124 @@ final class GoalIndex {
         }
         if (agent.job.isTrader()) {
             assignTrader(agent);
+            maybeFetchBoat(agent);
             return;
         }
-        if (agent.inventoryCount() >= BehaviorService.INVENTORY_CAPACITY) {
+        if (agent.inventoryCount() >= capacity(agent)) {
             setNearestCity(agent);
         } else {
             setBestResource(agent);
         }
+        maybeFetchBoat(agent);
+    }
+
+    private void maybeFetchBoat(Agent agent) {
+        if (vehiclesByAgent.containsKey(agent.id) || harbors.isEmpty() || agent.targetLocation == null) {
+            return;
+        }
+        if (atHarbor(agent)) {
+            City here = harborAt(agent);
+            if (here != null && here.boatStock > 0) {
+                setCity(agent, here);
+                return;
+            }
+            City stocked = nearestStockedHarbor(agent);
+            if (stocked != null) {
+                setCity(agent, stocked);
+            }
+            return;
+        }
+        if (!wantsBoat(agent)) {
+            return;
+        }
+        if (nearestStockedHarbor(agent) == null) {
+            return;
+        }
+        if (openWaterOnLine(agent.location, agent.targetLocation) < WorldConfig.WATER_CROSSING_TILES) {
+            return;
+        }
+        setNearestHarbor(agent);
+    }
+
+    private boolean wantsBoat(Agent agent) {
+        if (agent.job != null && agent.job.isTrader()) {
+            return true;
+        }
+        ResourceType harvests = agent.job == null ? null : agent.job.harvests();
+        return harvests == ResourceType.GOLD
+                || harvests == ResourceType.IRON
+                || harvests == ResourceType.STONE;
+    }
+
+    private City nearestStockedHarbor(Agent agent) {
+        City best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (City harbor : harbors) {
+            if (harbor.boatStock <= 0) {
+                continue;
+            }
+            double dist = dist2(agent.location, harbor.x, harbor.y);
+            if (best == null || dist < bestDist) {
+                best = harbor;
+                bestDist = dist;
+            }
+        }
+        return best;
+    }
+
+    private void setNearestHarbor(Agent agent) {
+        City best = nearestStockedHarbor(agent);
+        if (best == null) {
+            return;
+        }
+        setCity(agent, best);
+    }
+
+    private boolean atHarbor(Agent agent) {
+        return harborAt(agent) != null;
+    }
+
+    private City harborAt(Agent agent) {
+        int x = (int) Math.floor(agent.location.getX());
+        int y = (int) Math.floor(agent.location.getY());
+        int radius = WorldConfig.VILLAGE_RADIUS;
+        for (City harbor : harbors) {
+            if (Math.abs(harbor.x - x) <= radius && Math.abs(harbor.y - y) <= radius) {
+                return harbor;
+            }
+        }
+        return null;
+    }
+
+    private int openWaterOnLine(Point from, Point to) {
+        int x0 = (int) Math.floor(from.getX());
+        int y0 = (int) Math.floor(from.getY());
+        int x1 = (int) Math.floor(to.getX());
+        int y1 = (int) Math.floor(to.getY());
+        int dx = Math.abs(x1 - x0);
+        int dy = Math.abs(y1 - y0);
+        int sx = x0 < x1 ? 1 : -1;
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx - dy;
+        int water = 0;
+        while (true) {
+            if (openWater.contains(key(x0, y0))) {
+                water++;
+            }
+            if (x0 == x1 && y0 == y1) {
+                break;
+            }
+            int e2 = 2 * err;
+            if (e2 > -dy) {
+                err -= dy;
+                x0 += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y0 += sy;
+            }
+        }
+        return water;
     }
 
     private void setBestResource(Agent agent) {
@@ -176,7 +346,7 @@ final class GoalIndex {
             return;
         }
 
-        int need = Math.max(1, BehaviorService.INVENTORY_CAPACITY - agent.inventoryCount());
+        int need = Math.max(1, capacity(agent) - agent.inventoryCount());
         List<Patch> options = patches.getOrDefault(want, List.of());
         Patch best = null;
         int bestFill = -1;
@@ -237,20 +407,21 @@ final class GoalIndex {
         agent.currentPath = new ArrayList<>();
     }
 
-    static void setNearestCity(Agent agent) {
+    private void setNearestCity(Agent agent) {
         Point from = agent.location;
-        int[] best = WorldConfig.CITY_CENTERS[0];
-        double bestDist = dist2(from, best[0], best[1]);
-        for (int i = 1; i < WorldConfig.CITY_CENTERS.length; i++) {
-            int[] center = WorldConfig.CITY_CENTERS[i];
-            double dist = dist2(from, center[0], center[1]);
+        City best = cities.isEmpty() ? null : cities.get(0);
+        double bestDist = best == null ? Double.MAX_VALUE : dist2(from, best.x, best.y);
+        for (int i = 1; i < cities.size(); i++) {
+            City city = cities.get(i);
+            double dist = dist2(from, city.x, city.y);
             if (dist < bestDist) {
-                best = center;
+                best = city;
                 bestDist = dist;
             }
         }
-        agent.targetLocation = GeometryFactoryHolder.createPoint(best[0] + 0.5, best[1] + 0.5);
-        agent.currentPath = new ArrayList<>();
+        if (best != null) {
+            setCity(agent, best);
+        }
     }
 
     private Market highestPrice(ResourceType type) {
@@ -296,6 +467,12 @@ final class GoalIndex {
             }
         }
         return best;
+    }
+
+    private int capacity(Agent agent) {
+        return vehiclesByAgent.get(agent.id) == VehicleType.WAGON
+                ? BehaviorService.WAGON_CAPACITY
+                : BehaviorService.INVENTORY_CAPACITY;
     }
 
     private static ResourceType carriedType(Agent agent) {

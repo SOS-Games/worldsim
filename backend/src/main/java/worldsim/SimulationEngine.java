@@ -111,6 +111,10 @@ public class SimulationEngine {
 
         List<Agent> routing = new ArrayList<>();
         List<PathfindingService.PathPair> pairs = new ArrayList<>();
+        List<MovementMode> modes = new ArrayList<>();
+        Map<Long, Vehicle> vehicles = Vehicle.all().stream()
+                .filter(vehicle -> vehicle.id != null)
+                .collect(Collectors.toMap(vehicle -> vehicle.id, vehicle -> vehicle, (a, b) -> a));
 
         stepStarted = System.nanoTime();
         int patches = behaviorService.beginTick();
@@ -134,20 +138,36 @@ public class SimulationEngine {
                 }
                 routing.add(agent);
                 pairs.add(new PathfindingService.PathPair(startId, goalId));
+                modes.add(PathfindingService.modeOf(agent, vehicles));
             }
             sql.add(new SqlStepDto("goals", (System.nanoTime() - stepStarted) / 1_000_000, routing.size()));
 
             try {
                 stepStarted = System.nanoTime();
-                Map<PathfindingService.PathPair, List<PathPoint>> paths = pathfindingService.findPaths(pairs);
-                sql.add(new SqlStepDto("routes", (System.nanoTime() - stepStarted) / 1_000_000, paths.size()));
-                stepStarted = System.nanoTime();
-                for (int i = 0; i < routing.size(); i++) {
-                    applyPath(routing.get(i), paths.getOrDefault(pairs.get(i), List.of()));
-                    routing.get(i).persist();
-                    replanned++;
+                int routed = 0;
+                for (MovementMode mode : MovementMode.values()) {
+                    List<PathfindingService.PathPair> subset = new ArrayList<>();
+                    for (int i = 0; i < routing.size(); i++) {
+                        if (modes.get(i) == mode) {
+                            subset.add(pairs.get(i));
+                        }
+                    }
+                    if (subset.isEmpty()) {
+                        continue;
+                    }
+                    Map<PathfindingService.PathPair, List<PathPoint>> paths =
+                            pathfindingService.findPaths(subset, mode);
+                    routed += paths.size();
+                    for (int i = 0; i < routing.size(); i++) {
+                        if (modes.get(i) != mode) {
+                            continue;
+                        }
+                        applyPath(routing.get(i), paths.getOrDefault(pairs.get(i), List.of()));
+                        routing.get(i).persist();
+                        replanned++;
+                    }
                 }
-                java.add(new SqlStepDto("persist", (System.nanoTime() - stepStarted) / 1_000_000, replanned));
+                sql.add(new SqlStepDto("routes", (System.nanoTime() - stepStarted) / 1_000_000, routed));
             } catch (IllegalStateException e) {
                 tickMetrics.recordAiError(e);
             }
@@ -183,17 +203,17 @@ public class SimulationEngine {
                              OR jsonb_array_length(a.currentpath) = 0
                              OR (
                                     a.job IS DISTINCT FROM 'TRADER'
-                                AND inv.carried >= :capacity
+                                AND inv.carried >= %s
                                 AND (dest.id IS NULL OR dest.terraintype <> 'city')
                                 )
                              OR (
                                     a.job IS DISTINCT FROM 'TRADER'
-                                AND inv.carried < :capacity
+                                AND inv.carried < %s
                                 AND (
                                         dest.id IS NULL
                                      OR dest.terraintype = 'city'
                                      OR dest.resourcetype IS NULL
-                                     OR dest.quantity < (:capacity - inv.carried)
+                                     OR dest.quantity < (%s - inv.carried)
                                      OR NOT %s
                                     )
                                 )
@@ -204,8 +224,11 @@ public class SimulationEngine {
                           )
                         ORDER BY (a.id <= :cursor), a.id
                         LIMIT :limit
-                        """.formatted(DEST_JOB_HARVESTS))
-                .setParameter("capacity", BehaviorService.INVENTORY_CAPACITY)
+                        """.formatted(
+                                BehaviorService.capacitySql("a"),
+                                BehaviorService.capacitySql("a"),
+                                BehaviorService.capacitySql("a"),
+                                DEST_JOB_HARVESTS))
                 .setParameter("cursor", aiCursorId)
                 .setParameter("limit", AI_CANDIDATE_LOOKAHEAD)
                 .getResultList();

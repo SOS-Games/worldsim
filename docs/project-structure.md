@@ -5,8 +5,11 @@ worldsim/
 ├── backend/          # Quarkus simulation server
 │   └── src/main/java/worldsim/
 │       ├── Agent.java              # NPC entity (location, path, job, inventory)
-│       ├── Tile.java               # Grid tile with PostGIS Point + resources
-│       ├── TerrainType.java        # grass, mountain, city, forest, farm, mine, quarry, vein, meadow
+│       ├── Tile.java               # Grid tile: terrain, infrastructure, PostGIS point, resources
+│       ├── TerrainType.java        # water, grass, mountain, city, forest, farm, mine, quarry, vein, meadow
+│       ├── InfrastructureType.java # none, road, bridge, village, harbor
+│       ├── Vehicle.java            # Boat or wagon an agent can enter
+│       ├── PerlinNoise.java        # 2D noise for biomes and resource veins
 │       ├── ResourceType.java       # WOOD, GOLD, FOOD, STONE, IRON, HERBS
 │       ├── City.java               # Named city with a map center
 │       ├── Market.java             # Per-city stock + base price for each resource

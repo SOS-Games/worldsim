@@ -12,8 +12,8 @@ A tile-based world simulation where NPCs navigate a grid using PostgreSQL pathfi
 
 ## What's implemented
 
-- **100×100** tile world with mountain ridges, **9 cities**, and biome patches (forest, farm, mine, quarry, vein, meadow)
-- **240 agents** across seven jobs (six gatherers plus traders), gathering/trading via pgRouting paths
+- **200×200** tile world from Perlin noise: lakes, rivers from mountains to water, fields/forests, mountains, **9 cities**, resource-side **villages**, and **roads/bridges** between them
+- **480 agents** across seven jobs, plus **harbor boats** and **village wagons** for travel
 - Economic loop: gatherers sell into city markets; prices fall as stock rises; traders buy cheap and sell dear
 - Compact APIs: map loaded once, live positions over WebSocket, richer state for tooltips/paths
 - PixiJS viewer with pan/zoom, hover tooltips, and optional path overlay
@@ -42,7 +42,7 @@ quarkus dev
 # or: ./mvnw quarkus:dev
 ```
 
-On first startup (or when the map isn’t 100×100 / is missing biome tiles), the world is regenerated: 10,000 tiles, routing graph, resources, cities, and 240 agents. That can take a minute or two — the UI connection indicator waits until the live WebSocket connects.
+On first startup (or when the map isn’t 200×200 / is missing biome tiles), the world is regenerated: 40,000 tiles, routing graph, resources, cities, and 480 agents. That can take a few minutes — the UI connection indicator waits until the live WebSocket connects.
 
 ### 3. Start the frontend
 

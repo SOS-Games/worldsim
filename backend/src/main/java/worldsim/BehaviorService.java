@@ -13,7 +13,14 @@ import java.util.Map;
 @ApplicationScoped
 public class BehaviorService {
 
-    public static final int INVENTORY_CAPACITY = 10;
+    public static final int INVENTORY_CAPACITY = WorldConfig.INVENTORY_CAPACITY;
+    public static final int WAGON_CAPACITY = WorldConfig.WAGON_CAPACITY;
+
+    public static String capacitySql(String agentTable) {
+        return "CASE WHEN EXISTS (SELECT 1 FROM vehicle _cap WHERE _cap.id = "
+                + agentTable + ".vehicle_id AND _cap.type = 'WAGON') THEN "
+                + WAGON_CAPACITY + " ELSE " + INVENTORY_CAPACITY + " END";
+    }
 
     @Inject
     EntityManager entityManager;
@@ -56,7 +63,7 @@ public class BehaviorService {
             assignTraderGoal(agent);
             return;
         }
-        if (agent.inventoryCount() >= INVENTORY_CAPACITY) {
+        if (agent.inventoryCount() >= agent.inventoryCapacity()) {
             setTargetToNearestCity(agent);
         } else {
             setTargetToBestResource(agent);
@@ -82,7 +89,7 @@ public class BehaviorService {
             return;
         }
 
-        int need = INVENTORY_CAPACITY - agent.inventoryCount();
+        int need = agent.inventoryCapacity() - agent.inventoryCount();
         Tile resource = Tile.findBestResource(want, agent.location, need, agent.id);
         if (resource != null) {
             agent.targetLocation = resource.location;

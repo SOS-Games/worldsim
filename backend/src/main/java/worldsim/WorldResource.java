@@ -14,9 +14,12 @@ import worldsim.dto.DebugDto;
 import worldsim.dto.MapDto;
 import worldsim.dto.SqlDebugDto;
 import worldsim.dto.TileDto;
+import worldsim.dto.VehicleDto;
 import worldsim.dto.WorldStateDto;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Path("/world")
 public class WorldResource {
@@ -34,14 +37,17 @@ public class WorldResource {
     BackendDebugService backendDebugService;
 
     /**
-     * Static-ish map payload: dimensions plus non-grass tiles only (mountains, cities, biomes).
-     * Load once on the client.
+     * Static-ish map payload: dimensions plus non-grass tiles (water, mountains, cities,
+     * biomes, roads). Load once on the client.
      */
     @GET
     @Path("/map")
     @Produces(MediaType.APPLICATION_JSON)
     public MapDto getMap() {
-        List<TileDto> tiles = Tile.<Tile>list("terrainType <> ?1 or resourceType is not null", TerrainType.GRASS.code())
+        List<TileDto> tiles = Tile.<Tile>list(
+                        "terrainType <> ?1 or resourceType is not null or infrastructureType <> ?2",
+                        TerrainType.GRASS.code(),
+                        InfrastructureType.NONE.code())
                 .stream()
                 .map(TileDto::from)
                 .toList();
@@ -56,11 +62,19 @@ public class WorldResource {
     @Path("/state")
     @Produces(MediaType.APPLICATION_JSON)
     public WorldStateDto getState(@QueryParam("paths") @DefaultValue("false") boolean paths) {
+        List<Vehicle> parked = Vehicle.all();
+        Map<Long, String> vehicleTypes = new HashMap<>();
+        for (Vehicle vehicle : parked) {
+            if (vehicle.occupantId != null && vehicle.type != null) {
+                vehicleTypes.put(vehicle.occupantId, vehicle.type.name());
+            }
+        }
         List<AgentDto> agents = Agent.all().stream()
-                .map(agent -> AgentDto.from(agent, paths))
+                .map(agent -> AgentDto.from(agent, paths, vehicleTypes.get(agent.id)))
                 .toList();
         List<CityDto> cities = City.all().stream().map(CityDto::from).toList();
-        return new WorldStateDto(agents, tickMetrics.toDto(), cities);
+        List<VehicleDto> vehicles = parked.stream().map(VehicleDto::from).toList();
+        return new WorldStateDto(agents, tickMetrics.toDto(), cities, vehicles);
     }
 
     /**

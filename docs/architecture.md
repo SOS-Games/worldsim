@@ -26,16 +26,19 @@ Configured in `WorldConfig`:
 
 | Setting | Value |
 |---------|-------|
-| Map | 100×100 tiles |
-| Agents | 240 |
-| Cities | 9 |
-| Resource patches | forests, farms, mines, quarries, iron veins, and meadows |
+| Map | 200×200 tiles |
+| Agents | 480 |
+| Cities | 9 named cities plus small villages next to resource clusters |
+| Resource patches | Noise-shaped forests, farms, mines, quarries, iron veins, and meadows |
+| Water | Low-elevation lakes; rivers fan out from each mountain range and link lakes together |
+| Roads | Dirt roads between villages (and to the nearest city); bridges where a road crosses water |
+| Harbors | Coastal villages that sell boats. Walkers go around lakes or use bridges; boats cross water quickly |
 
-If the DB still has an older map (wrong size, or no biome tiles), startup wipes and regenerates to match.
+If the DB still has an older map (wrong size, too little water, too few mountains, bulky farms, no forest, no villages, or no harbors), startup wipes and regenerates to match.
 
 ## Navigation
 
-Pathfinding runs **in the database**; walking, harvest, and delivery also run **in the database**:
+Pathfinding runs **in the database**; walking, harvest, and delivery also run **in the database**. Roads cost 0.5. Open water is blocked for walkers (they use bridges or go around) and costs 0.5 for an agent in a boat:
 
 - **PostgreSQL physics** — one SQL statement steps every agent along their JSON path; harvest/delivery are bulk updates too
 - **PostgreSQL regen** — every 10 ticks, resource patches gain +1 up to their cap. Depleted patches keep their type and biome so they can grow back
@@ -58,7 +61,7 @@ Pathfinding runs **in the database**; walking, harvest, and delivery also run **
 | `HERBALIST` | `HERBS` | meadow | 55 |
 | `TRADER` | — | buys low / sells high between cities | — |
 
-Gatherers travel between **resource patches** and the nearest **city**:
+Gatherers travel between **resource patches** and the nearest **city or village**:
 
 1. Empty inventory → a stocked matching patch that can fill the inventory, spreading across that patch’s tiles when other workers are already headed there
 2. Harvest 1/tick until inventory is full (capacity 10) or the tile is depleted

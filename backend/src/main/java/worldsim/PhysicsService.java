@@ -68,7 +68,10 @@ public class PhysicsService {
         int delivered = timed(sql, "sell", this::sellToCities);
         int bought = timed(sql, "buy", this::buyFromCities);
         int harvested = timed(sql, "harvest", this::harvest);
+        int boarded = timed(sql, "vehicles", this::claimVehicles);
         int moved = timed(sql, "walk", this::moveAlongPaths);
+        moved += timed(sql, "sail", this::sailOnWater);
+        timed(sql, "tether", this::tetherVehicles);
         int regenerated = regenerate ? timed(sql, "regen", this::regenerateResources) : 0;
         long censusStarted = System.nanoTime();
         Census census = census();
@@ -157,6 +160,7 @@ public class PhysicsService {
                                    m.id AS market_id,
                                    m.resource_type AS resource_type,
                                    COALESCE(inv.carried, 0) AS carried,
+                                   %s AS cap,
                                    ROW_NUMBER() OVER (PARTITION BY m.id ORDER BY a.id) AS take_order
                             FROM agent a
                             JOIN tile t
@@ -174,7 +178,7 @@ public class PhysicsService {
                               AND a.trade_resource IS NOT NULL
                               AND t.terraintype = 'city'
                               AND t.city_id IS NOT NULL
-                              AND COALESCE(inv.carried, 0) < :capacity
+                              AND COALESCE(inv.carried, 0) < %s
                               AND %s
                         ),
                         taken AS (
@@ -205,13 +209,12 @@ public class PhysicsService {
                             UPDATE agent
                             SET currentpath = '[]'::jsonb
                             WHERE id IN (
-                                SELECT agent_id FROM taken WHERE carried + 1 >= :capacity
+                                SELECT agent_id FROM taken WHERE carried + 1 >= cap
                             )
                             RETURNING id
                         )
                         SELECT COUNT(*) FROM taken
-                        """.formatted(AT_LOW_PRICE))
-                .setParameter("capacity", BehaviorService.INVENTORY_CAPACITY)
+                        """.formatted(BehaviorService.capacitySql("a"), BehaviorService.capacitySql("a"), AT_LOW_PRICE))
                 .getSingleResult();
         return count.intValue();
     }
@@ -227,6 +230,7 @@ public class PhysicsService {
                                    t.id AS tile_id,
                                    t.resourcetype AS resource_type,
                                    COALESCE(inv.carried, 0) AS carried,
+                                   %s AS cap,
                                    ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY a.id) AS take_order
                             FROM agent a
                             JOIN tile t
@@ -241,7 +245,7 @@ public class PhysicsService {
                               AND a.job IS DISTINCT FROM 'TRADER'
                               AND t.resourcetype IS NOT NULL
                               AND t.quantity > 0
-                              AND COALESCE(inv.carried, 0) < :capacity
+                              AND COALESCE(inv.carried, 0) < %s
                               AND %s
                         ),
                         taken AS (
@@ -272,13 +276,15 @@ public class PhysicsService {
                             UPDATE agent
                             SET currentpath = '[]'::jsonb
                             WHERE id IN (
-                                SELECT agent_id FROM taken WHERE carried + 1 >= :capacity
+                                SELECT agent_id FROM taken WHERE carried + 1 >= cap
                             )
                             RETURNING id
                         )
                         SELECT COUNT(*) FROM taken
-                        """.formatted(JOB_HARVESTS))
-                .setParameter("capacity", BehaviorService.INVENTORY_CAPACITY)
+                        """.formatted(
+                                BehaviorService.capacitySql("a"),
+                                BehaviorService.capacitySql("a"),
+                                JOB_HARVESTS))
                 .getSingleResult();
         return count.intValue();
     }
@@ -288,23 +294,45 @@ public class PhysicsService {
      * Tile lookup is in a subquery so Postgres can use tile(x,y) and LATERAL can see the agent.
      */
     int moveAlongPaths() {
+        String cap = BehaviorService.capacitySql("a2");
         return entityManager.createNativeQuery("""
                         UPDATE agent a
                         SET location = ST_SetSRID(
                                 ST_MakePoint(
-                                    (a.currentpath->0->>'x')::double precision,
-                                    (a.currentpath->0->>'y')::double precision
+                                    (
+                                        CASE
+                                            WHEN src.infrastructuretype IN ('road', 'bridge')
+                                             AND jsonb_array_length(a.currentpath) >= 2
+                                            THEN a.currentpath->1
+                                            ELSE a.currentpath->0
+                                        END ->> 'x'
+                                    )::double precision,
+                                    (
+                                        CASE
+                                            WHEN src.infrastructuretype IN ('road', 'bridge')
+                                             AND jsonb_array_length(a.currentpath) >= 2
+                                            THEN a.currentpath->1
+                                            ELSE a.currentpath->0
+                                        END ->> 'y'
+                                    )::double precision
                                 ),
                                 4326
                             ),
-                            currentpath = a.currentpath - 0
+                            currentpath = CASE
+                                WHEN src.infrastructuretype IN ('road', 'bridge')
+                                 AND jsonb_array_length(a.currentpath) >= 2
+                                THEN (a.currentpath - 0) - 0
+                                ELSE a.currentpath - 0
+                            END
                         FROM (
                             SELECT a2.id,
                                    t.terraintype,
+                                   t.infrastructuretype,
                                    t.city_id,
                                    t.resourcetype,
                                    t.quantity,
-                                   COALESCE(inv.carried, 0) AS carried
+                                   COALESCE(inv.carried, 0) AS carried,
+                                   %s AS cap
                             FROM agent a2
                             JOIN tile t
                               ON t.x = FLOOR(ST_X(a2.location))::int
@@ -345,7 +373,7 @@ public class PhysicsService {
                                     a.job = 'TRADER'
                                 AND src.terraintype = 'city'
                                 AND src.city_id IS NOT NULL
-                                AND src.carried < :capacity
+                                AND src.carried < src.cap
                                 AND a.trade_resource IS NOT NULL
                                 AND EXISTS (
                                         SELECT 1 FROM market m
@@ -357,25 +385,132 @@ public class PhysicsService {
                              OR (
                                     src.resourcetype IS NOT NULL
                                 AND src.quantity > 0
-                                AND src.carried < :capacity
+                                AND src.carried < src.cap
                                 AND %s
                                 )
                           )
                         """.formatted(
+                                cap,
                                 AT_HIGH_PRICE,
                                 AT_LOW_PRICE,
                                 Job.sqlHarvestMatch("a.job", "src.resourcetype")))
-                .setParameter("capacity", BehaviorService.INVENTORY_CAPACITY)
                 .executeUpdate();
     }
 
     int regenerateResources() {
-        return entityManager.createNativeQuery("""
+        int tiles = entityManager.createNativeQuery("""
                         UPDATE tile
                         SET quantity = quantity + 1
                         WHERE resourcetype IS NOT NULL
                           AND %s
                         """.formatted(TILE_BELOW_CAP))
+                .executeUpdate();
+        int boats = entityManager.createNativeQuery("""
+                        UPDATE city
+                        SET boat_stock = LEAST(boat_stock + 1, :cap)
+                        WHERE harbor = TRUE
+                        """)
+                .setParameter("cap", WorldConfig.HARBOR_BOAT_CAP)
+                .executeUpdate();
+        return tiles + boats;
+    }
+
+    @SuppressWarnings("unchecked")
+    int claimVehicles() {
+        int claimed = 0;
+        List<Object[]> buyers = entityManager.createNativeQuery("""
+                        SELECT a.id, t.city_id
+                        FROM agent a
+                        JOIN tile t
+                          ON t.x = FLOOR(ST_X(a.location))::int
+                         AND t.y = FLOOR(ST_Y(a.location))::int
+                        WHERE a.vehicle_id IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM vehicle vh WHERE vh.occupant_id = a.id)
+                          AND t.infrastructuretype = 'harbor'
+                          AND t.city_id IS NOT NULL
+                        """)
+                .getResultList();
+        for (Object[] row : buyers) {
+            Agent agent = Agent.findById(((Number) row[0]).longValue());
+            City city = City.findById(((Number) row[1]).longValue());
+            if (agent == null || city == null || !city.harbor || city.boatStock <= 0) {
+                continue;
+            }
+            city.boatStock--;
+            city.persist();
+            Vehicle boat = new Vehicle();
+            boat.type = VehicleType.BOAT;
+            boat.location = GeometryFactoryHolder.createPoint(agent.location.getX(), agent.location.getY());
+            boat.speed = WorldConfig.BOAT_SPEED;
+            boat.occupantId = agent.id;
+            boat.homeCityId = city.id;
+            boat.persist();
+            entityManager.flush();
+            agent.vehicleId = boat.id;
+            agent.speed = boat.speed;
+            agent.persist();
+            claimed++;
+        }
+
+        List<Object[]> boarders = entityManager.createNativeQuery("""
+                        SELECT v.id, a.id
+                        FROM vehicle v
+                        JOIN agent a
+                          ON FLOOR(ST_X(a.location))::int = FLOOR(ST_X(v.location))::int
+                         AND FLOOR(ST_Y(a.location))::int = FLOOR(ST_Y(v.location))::int
+                        WHERE v.occupant_id IS NULL
+                          AND a.vehicle_id IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM vehicle vh WHERE vh.occupant_id = a.id)
+                          AND v.type = 'WAGON'
+                        """)
+                .getResultList();
+        for (Object[] row : boarders) {
+            Vehicle wagon = Vehicle.findById(((Number) row[0]).longValue());
+            Agent agent = Agent.findById(((Number) row[1]).longValue());
+            if (wagon == null || agent == null || wagon.occupantId != null || agent.vehicleId != null) {
+                continue;
+            }
+            wagon.occupantId = agent.id;
+            wagon.persist();
+            entityManager.flush();
+            agent.vehicleId = wagon.id;
+            agent.speed = wagon.speed;
+            agent.persist();
+            claimed++;
+        }
+        return claimed;
+    }
+
+    int sailOnWater() {
+        return entityManager.createNativeQuery("""
+                        UPDATE agent a
+                        SET location = ST_SetSRID(
+                                ST_MakePoint(
+                                    (a.currentpath->0->>'x')::double precision,
+                                    (a.currentpath->0->>'y')::double precision
+                                ),
+                                4326
+                            ),
+                            currentpath = a.currentpath - 0
+                        FROM vehicle v, tile t
+                        WHERE a.vehicle_id = v.id
+                          AND v.type = 'BOAT'
+                          AND t.x = FLOOR(ST_X(a.location))::int
+                          AND t.y = FLOOR(ST_Y(a.location))::int
+                          AND t.terraintype = 'water'
+                          AND jsonb_typeof(a.currentpath) = 'array'
+                          AND jsonb_array_length(a.currentpath) > 0
+                        """)
+                .executeUpdate();
+    }
+
+    int tetherVehicles() {
+        return entityManager.createNativeQuery("""
+                        UPDATE vehicle v
+                        SET location = a.location
+                        FROM agent a
+                        WHERE a.vehicle_id = v.id
+                        """)
                 .executeUpdate();
     }
 
@@ -390,12 +525,12 @@ public class PhysicsService {
                                  AND a.job IS DISTINCT FROM 'TRADER'
                                  AND t.resourcetype IS NOT NULL
                                  AND t.quantity > 0
-                                 AND COALESCE(inv.carried, 0) < :capacity
+                                 AND COALESCE(inv.carried, 0) < %s
                                  AND %s THEN 'harvesting'
                                 WHEN a.job = 'TRADER'
                                  AND t.terraintype = 'city'
                                  AND t.city_id IS NOT NULL
-                                 AND COALESCE(inv.carried, 0) < :capacity
+                                 AND COALESCE(inv.carried, 0) < %s
                                  AND a.trade_resource IS NOT NULL THEN 'buying'
                                 WHEN t.terraintype = 'city'
                                  AND COALESCE(inv.carried, 0) > 0 THEN 'depositing'
@@ -421,8 +556,10 @@ public class PhysicsService {
                             COUNT(*) FILTER (WHERE activity = 'depositing')::int,
                             COUNT(*) FILTER (WHERE activity = 'needRoute')::int
                         FROM classified
-                        """.formatted(JOB_HARVESTS))
-                .setParameter("capacity", BehaviorService.INVENTORY_CAPACITY)
+                        """.formatted(
+                                BehaviorService.capacitySql("a"),
+                                JOB_HARVESTS,
+                                BehaviorService.capacitySql("a")))
                 .getSingleResult();
         return new Census(
                 ((Number) row[0]).intValue(),

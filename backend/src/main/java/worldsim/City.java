@@ -1,6 +1,7 @@
 package worldsim;
 
 import io.quarkus.hibernate.orm.panache.PanacheEntity;
+import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.OneToMany;
@@ -15,6 +16,13 @@ public class City extends PanacheEntity {
     public String name;
     public int x;
     public int y;
+    public boolean harbor;
+
+    @Column(name = "boat_stock")
+    public int boatStock;
+
+    @Column(name = "wagon_stock")
+    public int wagonStock;
 
     @OneToMany(mappedBy = "city", fetch = FetchType.EAGER)
     public List<Market> listings = new ArrayList<>();

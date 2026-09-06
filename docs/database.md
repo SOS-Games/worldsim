@@ -29,6 +29,8 @@ Flyway migrations live in `backend/src/main/resources/db/migration/`:
 | `V8.0.0__inventory_resource_types.sql` | Drops old inventory resource-type check so stone/iron/herbs can persist |
 | `V9.0.0__tile_xy_index.sql` | Unique index on tile (x, y) so physics can find an NPC’s tile without scanning the map |
 | `V10.0.0__tile_resource_index.sql` | Partial index on resource tiles so gatherer AI can list stocked patches quickly |
+| `V11.0.0__tile_infrastructure.sql` | Tile roads/bridges/villages, movement cost, boat flag |
+| `V12.0.0__vehicles.sql` | Vehicles, harbor boat stock, boat/wagon routing costs |
 
 Hibernate also auto-updates entity tables (`Tile`, `Agent`, etc.) on startup via `quarkus.hibernate-orm.database.generation=update`.
 
