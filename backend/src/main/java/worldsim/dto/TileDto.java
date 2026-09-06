@@ -9,7 +9,8 @@ public record TileDto(
         String terrainType,
         CoordDto location,
         String resourceType,
-        int quantity) {
+        int quantity,
+        Long cityId) {
     public static TileDto from(Tile tile) {
         return new TileDto(
                 tile.id,
@@ -18,6 +19,7 @@ public record TileDto(
                 tile.terrainType,
                 CoordDto.from(tile.location),
                 tile.resourceType != null ? tile.resourceType.name() : null,
-                tile.quantity);
+                tile.quantity,
+                tile.cityId);
     }
 }

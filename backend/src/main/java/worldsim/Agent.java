@@ -9,11 +9,10 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.JoinColumn;
-import jakarta.persistence.JoinTable;
-import jakarta.persistence.ManyToMany;
 import jakarta.persistence.MapKeyColumn;
 import jakarta.persistence.MapKeyEnumerated;
-import jakarta.persistence.OrderColumn;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import org.locationtech.jts.geom.Point;
 
 import java.util.ArrayList;
@@ -36,6 +35,11 @@ public class Agent extends PanacheEntity {
     @Enumerated(EnumType.STRING)
     public Job job;
 
+    /** Resource a trader is currently buying or selling. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "trade_resource")
+    public ResourceType tradeResource;
+
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "agent_inventory", joinColumns = @JoinColumn(name = "agent_id"))
     @MapKeyEnumerated(EnumType.STRING)
@@ -43,13 +47,10 @@ public class Agent extends PanacheEntity {
     @Column(name = "quantity")
     public Map<ResourceType, Integer> inventory = new EnumMap<>(ResourceType.class);
 
-    @ManyToMany(fetch = FetchType.EAGER)
-    @JoinTable(
-            name = "agent_path",
-            joinColumns = @JoinColumn(name = "agent_id"),
-            inverseJoinColumns = @JoinColumn(name = "tile_id"))
-    @OrderColumn(name = "step_order")
-    public List<Tile> currentPath = new ArrayList<>();
+    /** Remaining waypoints as JSON — avoids heavy join-table updates each tick. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(columnDefinition = "jsonb")
+    public List<PathPoint> currentPath = new ArrayList<>();
 
     public void addToInventory(ResourceType type, int amount) {
         inventory.merge(type, amount, Integer::sum);

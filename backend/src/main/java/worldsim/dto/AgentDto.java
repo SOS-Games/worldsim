@@ -1,8 +1,8 @@
 package worldsim.dto;
 
 import worldsim.Agent;
+import worldsim.PathPoint;
 import worldsim.ResourceType;
-import worldsim.Tile;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,18 +17,20 @@ public record AgentDto(
         CoordDto targetLocation,
         List<CoordDto> path,
         String job,
+        String tradeResource,
         Map<String, Integer> inventory) {
-    public static AgentDto from(Agent agent) {
-        List<CoordDto> path = new ArrayList<>();
-        if (agent.location != null) {
-            path.add(CoordDto.from(agent.location));
-        }
-        for (Tile tile : agent.currentPath) {
-            path.add(CoordDto.from(tile.location));
-        }
+
+    public static AgentDto from(Agent agent, boolean includePath) {
         CoordDto target = agent.targetLocation != null ? CoordDto.from(agent.targetLocation) : null;
-        if (target != null && (path.isEmpty() || !coordsEqual(path.get(path.size() - 1), target))) {
-            path.add(target);
+
+        List<CoordDto> path = List.of();
+        if (includePath) {
+            path = new ArrayList<>();
+            if (agent.currentPath != null) {
+                for (PathPoint point : agent.currentPath) {
+                    path.add(new CoordDto(point.x(), point.y()));
+                }
+            }
         }
 
         Map<String, Integer> inventoryJson = new LinkedHashMap<>();
@@ -46,10 +48,7 @@ public record AgentDto(
                 target,
                 path,
                 agent.job != null ? agent.job.name() : null,
+                agent.tradeResource != null ? agent.tradeResource.name() : null,
                 inventoryJson);
-    }
-
-    private static boolean coordsEqual(CoordDto a, CoordDto b) {
-        return Math.abs(a.x() - b.x()) < 0.001 && Math.abs(a.y() - b.y()) < 0.001;
     }
 }
